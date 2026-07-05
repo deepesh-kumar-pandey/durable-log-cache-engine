@@ -63,7 +63,7 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 			}
 
 			// 1. Durability Layer: Commit intent to the WAL before handling work
-			logIntent := fmt.Appendf(nil, "START: %s", task.ID)
+			logIntent := []byte(fmt.Sprintf("START: %s", task.ID))
 			if err := wp.wal.Write(logIntent); err != nil {
 				log.Printf("[Worker %d] WAL critical write failure for task %s: %v", id, task.ID, err)
 				continue
@@ -75,7 +75,7 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 			time.Sleep(50 * time.Millisecond) // Simulated computational latency
 
 			// 3. Mark Complete in WAL
-			logCommit := fmt.Appendf(nil, "COMMIT: %s", task.ID)
+			logCommit := []byte(fmt.Sprintf("COMMIT: %s", task.ID))
 			if err := wp.wal.Write(logCommit); err != nil {
 				log.Printf("[Worker %d] WAL critical commit logging failure: %v", id, err)
 			}
