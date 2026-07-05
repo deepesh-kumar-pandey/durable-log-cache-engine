@@ -39,7 +39,7 @@ func NewWAL(path string) (*WAL, error) {
 	// - os.O_WRONLY: Optimizes performance by opening the file handle in write-only territory.
 	// - os.O_APPEND: Forces the OS kernel to atomically jump the file offset pointer to EOF before every single write execution.
 	// Permission 0644 (Octal): Owner can Read/Write, Groups/Others can strictly Read. Protects logs from erratic modification.
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		// %w wraps the raw operating system error descriptor, allowing underlying inspection via errors.Is() later
 		return nil, fmt.Errorf("failed to open/create WAL file: %w", err)
