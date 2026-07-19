@@ -24,7 +24,8 @@ func TestWorkerPool_ExecutionLifecycle(t *testing.T) {
 
 	workerCount := 3
 	queueSize := 10
-	pool := NewWorkerPool(wal, workerCount, queueSize)
+	// Configured with high rates (100.0, 100.0) so the limiter doesn't artificially slow down execution lifecycle tests
+	pool := NewWorkerPool(wal, workerCount, queueSize, 100.0, 100.0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -98,23 +99,18 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 		t.Fatalf("Failed to initialize WAL for panic verification: %v", err)
 	}
 
-	pool := NewWorkerPool(wal, 2, 10) // Small pool size to easily trace threads
+	// Configured with high rates (100.0, 100.0) to prevent throttling interference
+	pool := NewWorkerPool(wal, 2, 10, 100.0, 100.0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	pool.Start(ctx)
 
-	// 1. Submit a normal task
 	pool.Submit(Task{ID: "TX-GOOD-1", Payload: fmt.Appendf(nil, "safe_payload_data")})
-
-	// 2. Submit the poison pill task designed to crash an active worker
 	pool.Submit(Task{ID: "TX-POISON", Payload: fmt.Appendf(nil, "TRIGGER_PANIC")})
-
-	// 3. Submit a subsequent task to confirm a replacement worker picked it up
 	pool.Submit(Task{ID: "TX-GOOD-2", Payload: fmt.Appendf(nil, "post_recovery_payload")})
 
-	// Allow the pool to step through execution, panic, write to disk, and restart a thread
 	time.Sleep(500 * time.Millisecond)
 
 	pool.Stop()
@@ -124,7 +120,6 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 		t.Fatalf("Failed to close WAL instance: %v", err)
 	}
 
-	// Read log tracks to verify resilience compliance
 	recoveryWAL, err := cache.NewWAL(walPath)
 	if err != nil {
 		t.Fatalf("Failed to reopen WAL: %v", err)
@@ -150,7 +145,6 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 		}
 	}
 
-	// Enforce assertions
 	if !hasPoisonStart {
 		t.Errorf("Resilience failure: Poisoned task was never registered into the WAL")
 	}
@@ -159,5 +153,91 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 	}
 	if !hasGood2Commit {
 		t.Errorf("Resilience failure: The pool completely died; replacement worker never processed the remainder of the queue")
+	}
+}
+
+// TestWorkerPool_RateLimiting verifies that TrySubmit correctly drops bursts
+// of tasks exceeding structural token capacities (Load Shedding).
+func TestWorkerPool_RateLimiting(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "pipeline_rate_test.wal")
+
+	wal, err := cache.NewWAL(walPath)
+	if err != nil {
+		t.Fatalf("Failed to initialize WAL: %v", err)
+	}
+	defer wal.Close()
+
+	// Configure a pool with a maximum burst capacity of exactly 3 tokens, refilling at 1 token/sec
+	pool := NewWorkerPool(wal, 1, 10, 1.0, 3.0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+	defer pool.Stop()
+
+	acceptedCount := 0
+	rejectedCount := 0
+
+	// Fire 6 swift bursts of requests. The first 3 should consume the burst depth, subsequent 3 must drop.
+	for i := 1; i <= 6; i++ {
+		task := Task{ID: fmt.Sprintf("TX-BURST-%d", i), Payload: fmt.Appendf(nil, "data")}
+		if pool.TrySubmit(task) {
+			acceptedCount++
+		} else {
+			rejectedCount++
+		}
+	}
+
+	// We expect exactly 3 to leak through the bucket parameters and the rest to get shed safely.
+	if acceptedCount != 3 {
+		t.Errorf("Rate limiter error: Expected exactly 3 accepted tasks, got %d", acceptedCount)
+	}
+	if rejectedCount != 3 {
+		t.Errorf("Rate limiter error: Expected exactly 3 rejected tasks, got %d", rejectedCount)
+	}
+}
+
+// TestWorkerPool_TelemetryMetrics verifies that lock-free status tracking counters
+// calculate processing metrics flawlessly across multiple concurrent worker loops.
+func TestWorkerPool_TelemetryMetrics(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "pipeline_metrics_test.wal")
+
+	wal, err := cache.NewWAL(walPath)
+	if err != nil {
+		t.Fatalf("Failed to initialize WAL: %v", err)
+	}
+	defer wal.Close()
+
+	// 2 workers, maximum rate of 2 tokens/sec, burst size 2
+	pool := NewWorkerPool(wal, 2, 10, 2.0, 2.0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+
+	// Ingest combinations of safe, panic-inducing, and limited tasks
+	pool.Submit(Task{ID: "TX-METRIC-OK", Payload: fmt.Appendf(nil, "clean")})
+	pool.Submit(Task{ID: "TX-METRIC-PANIC", Payload: fmt.Appendf(nil, "TRIGGER_PANIC")})
+
+	// Burst immediate requests to force a load shed event
+	for i := 1; i <= 3; i++ {
+		_ = pool.TrySubmit(Task{ID: fmt.Sprintf("TX-METRIC-SHED-%d", i), Payload: fmt.Appendf(nil, "burst")})
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	pool.Stop()
+
+	stats := pool.GetStats()
+
+	if stats.TasksProcessed != 1 {
+		t.Errorf("Telemetry failure: Expected 1 successful process target, got %d", stats.TasksProcessed)
+	}
+	if stats.PanicIncidents != 1 {
+		t.Errorf("Telemetry failure: Expected exactly 1 logged engine panic event, got %d", stats.PanicIncidents)
+	}
+	if stats.TasksShed == 0 {
+		t.Errorf("Telemetry failure: Ingress flood failed to record any load shedding metrics")
 	}
 }
