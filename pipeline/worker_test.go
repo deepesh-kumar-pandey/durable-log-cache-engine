@@ -40,7 +40,7 @@ func TestWorkerPool_ExecutionLifecycle(t *testing.T) {
 	for i := 1; i <= taskCount; i++ {
 		task := Task{
 			ID:      fmt.Sprintf("TX-00%d", i),
-			Payload: []byte(fmt.Sprintf("payload_data_block_%d", i)),
+			Payload: []byte(fmt.Appendf(nil, "payload_data_block_%d", i)),
 		}
 		pool.Submit(task)
 	}
