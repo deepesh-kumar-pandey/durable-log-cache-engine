@@ -10,7 +10,7 @@ func BenchmarkCache_Set(b *testing.B) {
 	c := NewCache(10000)
 	payload := []byte("benchmark_payload_data")
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		c.Set(fmt.Sprintf("key-%d", i), payload)
 	}
 }
@@ -22,7 +22,7 @@ func BenchmarkCache_Get(b *testing.B) {
 		c.Set(fmt.Sprintf("key-%d", i), payload)
 	}
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		c.Get(fmt.Sprintf("key-%d", i%1000))
 	}
 }
@@ -52,7 +52,7 @@ func BenchmarkWAL_Write(b *testing.B) {
 
 	payload := []byte("benchmark_payload_1234567890")
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if err := wal.Write(payload); err != nil {
 			b.Fatalf("write failed: %v", err)
 		}
@@ -70,7 +70,7 @@ func BenchmarkWAL_WriteAndSync(b *testing.B) {
 
 	payload := []byte("benchmark_payload_1234567890")
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if err := wal.Write(payload); err != nil {
 			b.Fatalf("write failed: %v", err)
 		}

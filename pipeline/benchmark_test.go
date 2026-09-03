@@ -8,7 +8,7 @@ func BenchmarkTokenBucket_Allow(b *testing.B) {
 	// Practically infinite rate for benchmark to just test Allow() overhead
 	tb := NewTokenBucket(1_000_000_000.0, 1_000_000_000.0)
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		tb.Allow()
 	}
 }
