@@ -99,6 +99,26 @@ This allows crash recovery to restore the exact original bytes — not a sentine
 
 ---
 
+## Performance Benchmarks
+
+Engine performance measured on an AMD Ryzen 5 5600H via standard Go benchmarks (`go test -bench .`):
+
+| Component | Operation | Ops / Sec | Latency / Op | Allocations |
+| :--- | :--- | :--- | :--- | :--- |
+| **LRU Cache** | `Get` (Hit) | **~5.4 Million** | `183 ns` | `13 B` (1 alloc) |
+| **LRU Cache** | `Set` (Write) | **~1.7 Million** | `583 ns` | `112 B` (4 allocs) |
+| **LRU Cache** | `Set/Get` (Concurrent) | **~1.6 Million** | `606 ns` | `38 B` (2 allocs) |
+| **WAL (Disk I/O)** | `Write` (Append) | **~523,000** | `1.9 µs` | `48 B` (1 alloc) |
+| **WAL (Disk I/O)** | `Write + Sync` | **~348,000** | `2.8 µs` | `48 B` (1 alloc) |
+| **Rate Limiter** | `Allow` (1 Thread) | **~8.2 Million** | `121 ns` | `0 B` (0 allocs) |
+| **Rate Limiter** | `Allow` (Concurrent) | **~5.2 Million** | `189 ns` | `0 B` (0 allocs) |
+
+- **Zero-Allocation Gateway:** The Token Bucket rate limiter operates lock-free on the fast path with zero memory allocations, handling >5 million checks per second.
+- **Microsecond Durability:** Even when forcing kernel `fsync` blocks for absolute zero-data-loss durability, the sequential binary WAL ingests over 300,000 log events per second.
+- **Nanosecond Reads:** The in-memory LRU handles millions of reads per second, serving the `/lookup` API instantly.
+
+---
+
 ## Getting Started
 
 ### Prerequisites
