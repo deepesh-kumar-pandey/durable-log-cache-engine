@@ -11,6 +11,12 @@ import (
 	"log-cache-engine/cache"
 )
 
+// newTestPool is a helper that wires up a WAL + Cache and returns a WorkerPool
+// pre-configured for testing (high rate limits unless overridden by the caller).
+func newTestPool(wal *cache.WAL, workerCount, queueSize int, rate, burst float64) *WorkerPool {
+	return NewWorkerPool(wal, cache.NewCache(1000), workerCount, queueSize, rate, burst)
+}
+
 // TestWorkerPool_ExecutionLifecycle verifies that workers successfully process
 // submitted tasks, write state transitions to the WAL, and shut down cleanly.
 func TestWorkerPool_ExecutionLifecycle(t *testing.T) {
@@ -25,7 +31,7 @@ func TestWorkerPool_ExecutionLifecycle(t *testing.T) {
 	workerCount := 3
 	queueSize := 10
 	// Configured with high rates (100.0, 100.0) so the limiter doesn't artificially slow down execution lifecycle tests
-	pool := NewWorkerPool(wal, workerCount, queueSize, 100.0, 100.0)
+	pool := newTestPool(wal, workerCount, queueSize, 100.0, 100.0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -69,8 +75,7 @@ func TestWorkerPool_ExecutionLifecycle(t *testing.T) {
 		if strings.HasPrefix(logStr, "START: ") {
 			id := strings.TrimPrefix(logStr, "START: ")
 			startLogs[id] = true
-		} else if strings.HasPrefix(logStr, "COMMIT: ") {
-			id := strings.TrimPrefix(logStr, "COMMIT: ")
+		} else if id, _, ok := ParseCommitRecord(logStr); ok {
 			commitLogs[id] = true
 		}
 	}
@@ -100,7 +105,7 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 	}
 
 	// Configured with high rates (100.0, 100.0) to prevent throttling interference
-	pool := NewWorkerPool(wal, 2, 10, 100.0, 100.0)
+	pool := newTestPool(wal, 2, 10, 100.0, 100.0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -135,12 +140,12 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 
 	for _, entry := range entries {
 		logStr := string(entry.Payload)
-		switch logStr {
-		case "START: TX-POISON":
+		switch {
+		case logStr == "START: TX-POISON":
 			hasPoisonStart = true
-		case "CRASH: TX-POISON":
+		case logStr == "CRASH: TX-POISON":
 			hasPoisonCrash = true
-		case "COMMIT: TX-GOOD-2":
+		case strings.HasPrefix(logStr, "COMMIT: TX-GOOD-2"):
 			hasGood2Commit = true
 		}
 	}
@@ -169,7 +174,7 @@ func TestWorkerPool_RateLimiting(t *testing.T) {
 	defer wal.Close()
 
 	// Configure a pool with a maximum burst capacity of exactly 3 tokens, refilling at 1 token/sec
-	pool := NewWorkerPool(wal, 1, 10, 1.0, 3.0)
+	pool := newTestPool(wal, 1, 10, 1.0, 3.0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -211,7 +216,7 @@ func TestWorkerPool_TelemetryMetrics(t *testing.T) {
 	defer wal.Close()
 
 	// 2 workers, maximum rate of 2 tokens/sec, burst size 2
-	pool := NewWorkerPool(wal, 2, 10, 2.0, 2.0)
+	pool := newTestPool(wal, 2, 10, 2.0, 2.0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

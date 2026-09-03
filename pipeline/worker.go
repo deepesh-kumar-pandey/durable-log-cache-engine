@@ -2,8 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic" // Added for lock-free, high-performance counters
 	"time"
@@ -21,10 +23,12 @@ type EngineStats struct {
 	TasksProcessed uint64
 	PanicIncidents uint64
 	TasksShed      uint64
+	CacheSize      int // Number of committed records currently held in the volatile index
 }
 
 type WorkerPool struct {
 	wal          *cache.WAL
+	cache        *cache.Cache // Volatile in-memory index; populated during WAL recovery and kept hot by workers
 	taskChannel  chan Task
 	workerCount  int
 	wg           sync.WaitGroup
@@ -39,14 +43,35 @@ type WorkerPool struct {
 	tasksShed      uint64
 }
 
-func NewWorkerPool(wal *cache.WAL, workerCount int, queueSize int, maxRate float64, burstSize float64) *WorkerPool {
+func NewWorkerPool(wal *cache.WAL, c *cache.Cache, workerCount int, queueSize int, maxRate float64, burstSize float64) *WorkerPool {
 	return &WorkerPool{
 		wal:          wal,
+		cache:        c,
 		taskChannel:  make(chan Task, queueSize),
 		workerCount:  workerCount,
 		nextWorkerID: 1,
 		limiter:      NewTokenBucket(maxRate, burstSize),
 	}
+}
+
+// ParseCommitRecord decodes a WAL COMMIT entry of the form "COMMIT: <id>|<base64(payload)>".
+// Returns (taskID, payloadBytes, true) on success; ("" , nil, false) if the record is not a COMMIT entry.
+// Handles the legacy format "COMMIT: <id>" (no payload) by returning nil payload bytes.
+func ParseCommitRecord(record string) (id string, payload []byte, ok bool) {
+	if !strings.HasPrefix(record, "COMMIT: ") {
+		return "", nil, false
+	}
+	rest := strings.TrimPrefix(record, "COMMIT: ")
+	parts := strings.SplitN(rest, "|", 2)
+	id = parts[0]
+	if len(parts) == 2 {
+		decoded, err := base64.StdEncoding.DecodeString(parts[1])
+		if err == nil {
+			return id, decoded, true
+		}
+	}
+	// Legacy format or decode error — return ID with nil payload.
+	return id, nil, true
 }
 
 func (wp *WorkerPool) Start(ctx context.Context) {
@@ -97,6 +122,7 @@ func (wp *WorkerPool) GetStats() EngineStats {
 		TasksProcessed: atomic.LoadUint64(&wp.tasksProcessed),
 		PanicIncidents: atomic.LoadUint64(&wp.panicIncidents),
 		TasksShed:      atomic.LoadUint64(&wp.tasksShed),
+		CacheSize:      wp.cache.Len(),
 	}
 }
 
@@ -151,10 +177,16 @@ func (wp *WorkerPool) worker(id int) {
 
 			time.Sleep(50 * time.Millisecond)
 
-			logCommit := fmt.Appendf(nil, "COMMIT: %s", task.ID)
+			// Embed the base64-encoded payload inside the COMMIT record so crash
+			// recovery can restore the original data bytes on restart.
+			encoded := base64.StdEncoding.EncodeToString(task.Payload)
+			logCommit := fmt.Appendf(nil, "COMMIT: %s|%s", task.ID, encoded)
 			if err := wp.wal.Write(logCommit); err != nil {
 				log.Printf("[Worker %d] WAL critical commit logging failure: %v", id, err)
 			}
+
+			// Update the in-memory index so the hot read path reflects committed state.
+			wp.cache.Set(task.ID, task.Payload)
 
 			atomic.AddUint64(&wp.tasksProcessed, 1) // Increment successful completion metric
 			currentTask = nil
