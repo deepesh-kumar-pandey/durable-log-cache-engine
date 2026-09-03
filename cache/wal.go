@@ -4,6 +4,7 @@ import (
 	"encoding/binary" // Used for low-overhead, zero-allocation binary parsing (BigEndian encoding)
 	"fmt"             // Used for wrapping errors cleanly using structural format verbs like %w
 	"io"              // Used strictly to catch the standard io.EOF token during recovery loops
+	"log"             // Structured compaction progress reporting
 	"os"              // Low-level operating system interface for managing file descriptors and syscalls
 	"sync"            // Mutex primitives to ensure thread safety across multi-core worker pipelines
 	"time"            // High-precision tracking primitives for nanosecond logging timestamps
@@ -22,6 +23,7 @@ const (
 type WAL struct {
 	mu   sync.Mutex // Protects the underlying file descriptor and append offset from concurrent races
 	file *os.File   // Pointer to the operating system's active file descriptor tracking handle
+	path string     // Filesystem path of the WAL file, used for logging and compaction
 }
 
 // LogEntry encapsulates an unmarshaled, high-fidelity log record decoded from the WAL on disk.
@@ -48,6 +50,7 @@ func NewWAL(path string) (*WAL, error) {
 	// Return a pointer to the instantiated struct to ensure a single immutable file descriptor state is shared
 	return &WAL{
 		file: file,
+		path: path,
 	}, nil
 }
 
@@ -161,5 +164,27 @@ func (w *WAL) Close() error {
 	if err := w.file.Close(); err != nil {
 		return fmt.Errorf("failed to close WAL file handle: %w", err)
 	}
+	return nil
+}
+
+// Compact truncates the WAL to zero bytes, discarding all historical records.
+// It is called after a successful crash recovery sweep once all committed entries
+// have been safely loaded into the in-memory cache index. The truncation is
+// durable: Truncate + Seek + Sync ensure the OS flushes the size change to disk
+// before the engine begins accepting new writes.
+func (w *WAL) Compact() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.file.Truncate(0); err != nil {
+		return fmt.Errorf("WAL compaction: truncate failed: %w", err)
+	}
+	if _, err := w.file.Seek(0, 0); err != nil {
+		return fmt.Errorf("WAL compaction: seek failed: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("WAL compaction: sync failed: %w", err)
+	}
+	log.Printf("[WAL] Compaction complete — %s reset to 0 bytes.", w.path)
 	return nil
 }
